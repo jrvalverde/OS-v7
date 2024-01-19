@@ -1,0 +1,35 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN"
+"http://www.w3.org/TR/REC-html40/loose.dtd">
+<HTML>
+ <HEAD>
+  <TITLE>Index of /unix/local/unix/v7hs/40</TITLE>
+ <META NAME="generator", CONTENT="mod_autoindex"> </HEAD>
+ <BODY bgcolor="#ffffff" text="#000000">
+
+<TABLE><TR><TD bgcolor="#ffffff" class="title">
+<FONT size="+3" face="Helvetica,Arial,sans-serif">
+<B>Index of /unix/local/unix/v7hs/40</B></FONT>
+
+</TD></TR></TABLE><PRE><IMG border="0" src="/icons/blank.gif" ALT="     "> <A HREF="?N=D">Name</A>                    <A HREF="?M=A">Last modified</A>       <A HREF="?S=A">Size</A>  <A HREF="?D=A">Description</A>
+<HR noshade align="left" width="80%">
+<IMG border="0" src="/icons/back.gif" ALT="[DIR]"> <A HREF="/unix/local/unix/v7hs/">Parent Directory</A>        08-Dec-2004 21:03      -  
+<IMG border="0" src="/icons/text.gif" ALT="[TXT]"> <A HREF="m40.s">m40.s</A>                   15-May-1979 00:00    12k  
+<IMG border="0" src="/icons/text.gif" ALT="[TXT]"> <A HREF="param.h">param.h</A>                 24-Feb-1979 00:00     4k  
+</PRE><HR noshade align="left" width="80%">
+<PRE>
+The m40.s here is purported to support 7th edition Unix
+on the 11/40, 11/60, and 11/23.  It has, in fact,
+worked on the latter machine.
+The param.h is included because various sizes have to
+be cut down considerably; this is a guide.
+(Things will be tight!  You might consider removing some system calls
+you don't care about, like accounting.)
+Also, it is necessary to remove the
+	.data
+from line 3 of the l.s file, because the interrupt
+vectors and such should go in I space.
+
+Support is included for FP11-style floating point
+but I can't vouch for it.
+</PRE>
+</BODY></HTML>

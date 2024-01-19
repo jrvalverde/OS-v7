@@ -1,0 +1,312 @@
+#
+
+#include "param.h"
+#include "buf.h"
+#include "conf.h"
+#include "selch.h"
+
+/*
+ * 10-mb cartridge disk driver
+ */
+
+int dskseek(), dskscintr(), dsknrdy();
+
+struct devtab	dsktab;
+struct buf	rdskbuf;
+
+struct selchq dskscq {
+	&dskseek,
+	&dskscintr,
+	0
+};
+
+int	dskfile;
+int	dskcyl;
+int	dsksector;
+int	dsksad, dskead;
+int	dskseekf;
+int	dskqlen;		/* current length of i/o queue
+				   (for display only */
+
+#define NDSK	4		/* number of disks */
+#define NDSKBLK	9792		/* number of blocks on disk */
+#define NDSKERR	10		/* number of error retries */
+
+/* device addresses */
+
+#define NSELCH	0	/* connected to first selch */
+
+int	cntladdr	0xb6;		/* disk controller */
+char	dskaddr[NDSK] {			/* disk files */
+	0xc6,
+	0xc7,
+	0xd6,
+	0xd7
+};
+
+/* disk file status & commands */
+
+#define	UNRCV		0156
+#define	ADDR_INTLK	0020
+#define	WRT_PROT	0200
+#define	NOT_READY	0001
+
+#define	SEEK		0102
+
+/* disk controller status & commands */
+
+#define	CNTL_UNRCV	0341
+#define	OVERRUN		0200
+#define	CYL_OV		0020
+
+#define	READ		0001
+#define	WRITE		0002
+
+/*
+ *	disk strategy routine
+ */
+dskstrategy(abp)
+{
+	register struct buf *bp;
+
+	bp = abp;
+	bp->b_resid = bp->b_bcount;
+
+	if (bp->b_dev.d_minor >= NDSK) {
+		bp->b_flags =| B_ERROR;
+		iodone(bp);
+		return;
+	}
+
+	/*
+	 * Block no. too high -- looks like EOF for raw read, error otherwise
+	 */
+	if (bp->b_blkno >= NDSKBLK) {
+		if ((bp->b_flags&(B_PHYS|B_READ)) != (B_PHYS|B_READ))
+			bp->b_flags =| B_ERROR;
+		iodone(bp);
+		return;
+	}
+	bp->av_forw = 0;
+	spl(5);
+	dskqlen = (dskqlen<<1) | 01;
+	if (dsktab.d_actf == 0)
+		dsktab.d_actf = bp;
+	else
+		dsktab.d_actl->av_forw = bp;
+	dsktab.d_actl = bp;
+	if (dsktab.d_active == 0)
+		dskstart();
+	spl(0);
+}
+
+/*
+ * start next disk i/o operation
+ *	- set up file address, cylinder/head/sector address
+ *	- set up memory start & end addresses
+ *	- check disk status
+ *	- initiate seek
+ */
+
+dskstart()
+{
+	register struct buf *bp;
+	register stat;
+
+	if (!(bp = dsktab.d_actf))
+		return;
+	dsktab.d_active++;
+
+	trace(01<<16, "dstart", bp);
+
+	dskfile = dskaddr[bp->b_dev.d_minor];
+	dskcyl = bp->b_blkno / 24;
+	if ((dsksector = (bp->b_blkno<<1) % 48) > 23)
+		dsksector =+ 32-24;
+
+	dsksad = bp->b_addr;
+	dskead = bp->b_addr + bp->b_bcount - 1;
+
+	selchreq(NSELCH, &dskscq);
+}
+
+dskseek()
+{
+	register stat;
+
+	trace(010<<16, "seek", dskfile);
+	trace(010<<16, "cyl", dskcyl);
+
+	while ((stat = ss(dskfile))&~WRT_PROT) {
+		if (stat & ADDR_INTLK)
+			continue;
+		if (stat & NOT_READY) {
+			selchfree(NSELCH);
+			timeout(&dsknrdy, 0, 1000);
+			return;
+		}
+		if (stat & UNRCV) {
+			dsktab.d_errcnt = NDSKERR;
+			dskerror(dsktab.d_actf, stat, dskfile);
+			return;
+		}
+	}
+	dskseekf++;
+	wh(dskfile, dskcyl);
+	oc(dskfile, SEEK);
+}
+
+/*
+ * disk not ready routine
+ *	- retry I/O every 10 seconds until disk starts again
+ */
+dsknrdy()
+{
+	selchreq(NSELCH, &dskscq);
+}
+
+/*
+ * disk interrupt routine
+ *	-disk interrupts only after a seek (I hope)
+ *	-check status, initiate read/write
+ */
+
+dskintr(dev,stat)
+{
+	register struct buf *bp;
+	register scmd, ccmd;
+
+	trace(020<<16, "interrupt", dev);
+	trace(020<<16, "status", stat);
+
+	if (!(bp = dsktab.d_actf) || !dskseekf)
+		return;
+	dskseekf = 0;
+
+	if (stat & ~WRT_PROT) {
+		dskerror(bp, stat, dskfile);
+		return;
+	}
+
+	if (bp->b_flags & B_READ) {
+		scmd = READ_GO;
+		ccmd = READ;
+	} else {
+		scmd = GO;
+		ccmd = WRITE;
+	}
+
+	trace(010<<16, "dcmd", ccmd);
+	trace(010<<16, "sector", dsksector);
+
+	oc(selchaddr[NSELCH], STOP);
+	trace(010<<16, "bufstart", dsksad);
+	trace(010<<16, "bufend", dskead);
+	wdh(selchaddr[NSELCH], dsksad);
+	wdh(selchaddr[NSELCH], dskead);
+	wh(dskfile, dskcyl);
+	wd(cntladdr, dsksector);
+	oc(cntladdr, ccmd);
+	oc(selchaddr[NSELCH], scmd);
+}
+
+/*
+ * selch interrupt routine
+ *	-selch interrupt will be followed by a controller interrupt
+ *	 (unless OVERRUN status is set)
+ */
+
+dskscintr(dev, stat)
+{
+	register struct buf *bp;
+
+	if (!(bp = dsktab.d_actf))
+		return;
+
+	oc(selchaddr[NSELCH], STOP);
+	if ((stat = ss(cntladdr))&OVERRUN)
+		dskerror(bp, stat, cntladdr);
+}
+
+/*
+ * disk controller interrupt routine
+ *	-check ending status, signal i/o done
+ */
+
+cntlintr(dev, stat)
+{
+	register struct buf *bp;
+	trace(020<<16, "interrupt", dev);
+	trace(020<<16, "status", stat);
+
+
+	if (!(bp = dsktab.d_actf))
+		return;
+	if (dskseekf)
+		return;
+
+	if (stat & CNTL_UNRCV) {
+		dskerror(bp, stat, cntladdr);
+		return;
+	}
+	bp->b_resid = 0;
+
+	/*
+	 * Cylinder overflow
+	 */
+	if (stat & CYL_OV) {
+		oc(selchaddr[NSELCH], STOP);
+		dsksad =+ (rdh(selchaddr[NSELCH])-dsksad+2)&~0377;
+		trace(020<<16, "cyl ov", dsksad);
+		dsksector = 0;
+		bp->b_resid = dskead - dsksad;
+		if (++dskcyl < NDSKBLK/24) {
+			dskseek();
+			return;
+		} else
+			if ((bp->b_flags&(B_PHYS|B_READ)) != (B_PHYS|B_READ))
+				bp->b_flags =| B_ERROR;
+	}
+
+	dsktab.d_errcnt = 0;
+	dsktab.d_active = 0;
+	dsktab.d_actf = bp->av_forw;
+	dskqlen =>> 1;
+	iodone(bp);
+	selchfree(NSELCH);
+	dskstart();
+}
+
+dskerror(abp, stat, addr)
+struct buf *abp;
+{
+	register struct buf *bp;
+
+	bp = abp;
+	deverror(bp, stat, addr);
+	if (++dsktab.d_errcnt <= NDSKERR) {
+		dskseek();
+		return;
+	}
+	dsktab.d_errcnt = 0;
+	bp->b_flags =| B_ERROR;
+	dsktab.d_active = 0;
+	dsktab.d_actf = bp->av_forw;
+	dskqlen =>> 1;
+	iodone(bp);
+	selchfree(NSELCH);
+	dskstart();
+}
+
+/*
+ * 'Raw' disc interface
+ */
+dskread(dev)
+{
+	physio(dskstrategy, &rdskbuf, dev, B_READ);
+}
+
+dskwrite(dev)
+{
+	physio(dskstrategy, &rdskbuf, dev, B_WRITE);
+}
